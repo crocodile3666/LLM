@@ -39,7 +39,7 @@ def chat():
         return jsonify({'error': '消息不能为空'}), 400
 
     # 获取AI响应
-    ai_response = get_ai_response(user_message)
+    ai_response = LLMmain.chat_with_memory(user_message)
 
     return jsonify({
         'user_message': user_message,
