@@ -1,0 +1,3 @@
+@echo off
+echo Starting the backend server and opening the web page...
+python app.py

@@ -41,7 +41,7 @@ prompt_template = ChatPromptTemplate.from_messages(
     [("system", system_template)]
 )
 prompt = prompt_template
-prompt = prompt_template.invoke({"text":  "现在，请以斯内普教授的身份开始我们的对话，首先对我这个新学生说第一句话。"})
+prompt = prompt_template.invoke({"text":  "现在，请以扮演的角色的身份开始我们的对话，首先对我说第一句话。"})
 prompt.to_messages()
 
 # 转换为七牛云api符合的格式

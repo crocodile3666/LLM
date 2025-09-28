@@ -48,14 +48,12 @@ def play_audio(base64_string):
 # data_json = response.json()
 # print(response.json())
 
-def content(data):  #格式转换
-    data_json = data.json()
-    data_content = data_json['data']
-    return data_content
 # data_content = data_json['data']
 # play_audio(data_content)
 
 def TTS(content):
     response = TTSmain(content)
-    data_content = content(response)
+    data_json = response.json() #格式转换
+    data_content = data_json['data']
     play_audio(data_content)
+# TTS(LLMmain.fristsentence)
