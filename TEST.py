@@ -1,207 +1,250 @@
-import os
-import LLMmain
+import asyncio
+import gzip
+import json
+import time
+import uuid
+import websockets
 import pyaudio
-import io
-import wave
-import base64
-import requests
-import datetime
+import LLMmain
+import os
 
-# 音频录制参数
-CHUNK = 1024
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-RATE = 16000  # 16kHz采样率，适合语音识别
-RECORD_SECONDS = 5  # 录制5秒
+# -------------------- 协议相关常量和函数 --------------------
 
+PROTOCOL_VERSION = 0b0001
 
-def list_audio_devices():
-    """列出所有可用的音频设备"""
-    p = pyaudio.PyAudio()
-    print("可用的音频设备:")
-    for i in range(p.get_device_count()):
-        device_info = p.get_device_info_by_index(i)
-        print(f"设备 {i}: {device_info['name']}")
-        print(f"   最大输入通道数: {device_info['maxInputChannels']}")
-        print(f"   最大输出通道数: {device_info['maxOutputChannels']}")
-    p.terminate()
+# Message Types
+FULL_CLIENT_REQUEST = 0b0001
+AUDIO_ONLY_REQUEST = 0b0010
+FULL_SERVER_RESPONSE = 0b1001
+SERVER_ACK = 0b1011
+SERVER_ERROR_RESPONSE = 0b1111
 
+# Message Type Specific Flags
+NO_SEQUENCE = 0b0000
+POS_SEQUENCE = 0b0001
+NEG_SEQUENCE = 0b0010
+NEG_WITH_SEQUENCE = 0b0011
 
-def find_input_device():
-    """查找可用的输入设备"""
-    p = pyaudio.PyAudio()
-    input_device = None
-
-    for i in range(p.get_device_count()):
-        device_info = p.get_device_info_by_index(i)
-        if device_info['maxInputChannels'] > 0:
-            print(f"找到输入设备: {i} - {device_info['name']}")
-            input_device = i
-            break
-
-    p.terminate()
-    return input_device
+# 序列化和压缩方式
+NO_SERIALIZATION = 0b0000
+JSON_SERIALIZATION = 0b0001
+NO_COMPRESSION = 0b0000
+GZIP_COMPRESSION = 0b0001
 
 
-def record_audio():
-    """录制麦克风音频并返回base64编码的音频数据"""
-    try:
+def generate_header(message_type=FULL_CLIENT_REQUEST,
+                    message_type_specific_flags=NO_SEQUENCE,
+                    serial_method=JSON_SERIALIZATION,
+                    compression_type=GZIP_COMPRESSION,
+                    reserved_data=0x00):
+    header = bytearray()
+    header_size = 1
+    header.append((PROTOCOL_VERSION << 4) | header_size)
+    header.append((message_type << 4) | message_type_specific_flags)
+    header.append((serial_method << 4) | compression_type)
+    header.append(reserved_data)
+    return header
+
+
+def generate_before_payload(sequence: int):
+    before_payload = bytearray()
+    before_payload.extend(sequence.to_bytes(4, 'big', signed=True))
+    return before_payload
+
+
+def parse_response(res):
+    """
+    如果 res 是 bytes，则按协议解析；
+    如果 res 是 str，则直接返回文本内容，避免出现位移操作错误。
+    """
+    if not isinstance(res, bytes):
+        return {'payload_msg': res}
+    header_size = res[0] & 0x0f
+    message_type = res[1] >> 4
+    message_type_specific_flags = res[1] & 0x0f
+    serialization_method = res[2] >> 4
+    message_compression = res[2] & 0x0f
+    payload = res[header_size * 4:]
+    result = {}
+    if message_type_specific_flags & 0x01:
+        seq = int.from_bytes(payload[:4], "big", signed=True)
+        result['payload_sequence'] = seq
+        payload = payload[4:]
+    result['is_last_package'] = bool(message_type_specific_flags & 0x02)
+    if message_type == FULL_SERVER_RESPONSE:
+        payload_size = int.from_bytes(payload[:4], "big", signed=True)
+        payload_msg = payload[4:]
+    elif message_type == SERVER_ACK:
+        seq = int.from_bytes(payload[:4], "big", signed=True)
+        result['seq'] = seq
+        if len(payload) >= 8:
+            payload_size = int.from_bytes(payload[4:8], "big", signed=False)
+            payload_msg = payload[8:]
+        else:
+            payload_msg = b""
+    elif message_type == SERVER_ERROR_RESPONSE:
+        code = int.from_bytes(payload[:4], "big", signed=False)
+        result['code'] = code
+        payload_size = int.from_bytes(payload[4:8], "big", signed=False)
+        payload_msg = payload[8:]
+    else:
+        payload_msg = payload
+
+    if message_compression == GZIP_COMPRESSION:
+        try:
+            payload_msg = gzip.decompress(payload_msg)
+        except Exception as e:
+            pass
+    if serialization_method == JSON_SERIALIZATION:
+        try:
+            payload_text = payload_msg.decode("utf-8")
+            payload_msg = json.loads(payload_text)
+        except Exception as e:
+            pass
+    else:
+        payload_msg = payload_msg.decode("utf-8", errors="ignore")
+    result['payload_msg'] = payload_msg
+    return result
+
+
+# -------------------- 基于麦克风采集 PCM 数据的 ASR 测试客户端 --------------------
+
+class AsrMicClient:
+    def __init__(self, token, ws_url, seg_duration=100, sample_rate=16000, channels=1, bits=16, format="pcm", **kwargs):
+        """
+        :param token: 鉴权 token
+        :param ws_url: ASR websocket 服务地址
+        :param seg_duration: 分段时长，单位毫秒
+        :param sample_rate: 采样率（Hz）
+        :param channels: 通道数（一般单声道为 1）
+        :param bits: 采样位数（16 表示 16 位）
+        :param format: 音频格式，这里设为 "pcm"
+        """
+        self.token = token
+        self.ws_url = ws_url
+        self.seg_duration = seg_duration  # 毫秒
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.bits = bits
+        self.format = format
+        self.uid = kwargs.get("uid", "test")
+        self.codec = kwargs.get("codec", "raw")
+        self.streaming = kwargs.get("streaming", True)
+
+    def construct_request(self, reqid):
+        req = {
+            "user": {"uid": self.uid},
+            "audio": {
+                "format": self.format,
+                "sample_rate": self.sample_rate,
+                "bits": self.bits,
+                "channel": self.channels,
+                "codec": self.codec,
+            },
+            "request": {"model_name": "asr", "enable_punc": True}
+        }
+        return req
+
+    async def stream_mic(self):
+        """
+        异步生成麦克风采集的 PCM 数据段，
+        使用 pyaudio 读取数据时设置 exception_on_overflow=False 避免输入溢出异常。
+        """
         p = pyaudio.PyAudio()
-
-        # 查找可用的输入设备
-        input_device = find_input_device()
-        if input_device is None:
-            print("错误: 未找到可用的音频输入设备")
-            list_audio_devices()
-            return None
-
-        print(f"使用音频输入设备: {input_device}")
-        print("开始录音...（5秒）")
-
-        stream = p.open(format=FORMAT,
-                        channels=CHANNELS,
-                        rate=RATE,
-                        input=True,
-                        input_device_index=input_device,  # 指定输入设备
-                        frames_per_buffer=CHUNK)
-
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=self.channels,
+            rate=self.sample_rate,
+            input=True,
+            frames_per_buffer=1024)
+        bytes_per_frame = self.channels * (self.bits // 8)
+        frames_needed = int(self.sample_rate * self.seg_duration / 1000)
+        bytes_needed = frames_needed * bytes_per_frame
         frames = []
-
-        for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
-            data = stream.read(CHUNK)
+        while True:
+            try:
+                data = await asyncio.to_thread(stream.read, 1024, False)
+            except Exception as e:
+                print("麦克风读取错误:", e)
+                continue
             frames.append(data)
+            if sum(len(f) for f in frames) >= bytes_needed:
+                segment = b"".join(frames)[:bytes_needed]
+                yield segment
+                frames = []
 
-        print("录音结束")
+    async def execute(self):
+        reqid = str(uuid.uuid4())
+        seq = 1
+        request_params = self.construct_request(reqid)
+        payload_bytes = json.dumps(request_params).encode("utf-8")
+        payload_bytes = gzip.compress(payload_bytes)
+        # 构造初始配置信息请求
+        full_client_request = bytearray(generate_header(message_type_specific_flags=POS_SEQUENCE))
+        full_client_request.extend(generate_before_payload(sequence=seq))
+        full_client_request.extend((len(payload_bytes)).to_bytes(4, "big"))
+        full_client_request.extend(payload_bytes)
+        headers = {"Authorization": "Bearer " + self.token}
+        # 用于记录上一次满足条件的响应文本与时间
+        begin_time = time.time()
+        print(f"开始时间：{begin_time}")
 
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
+        try:
+            async with websockets.connect(self.ws_url, extra_headers=headers, max_size=1000000000) as ws:
+                await ws.send(full_client_request)
+                try:
+                    res = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    print(f"{time.time() - begin_time}毫秒等待配置信息响应超时")
+                    return
+                result = parse_response(res)
+                print(f"{time.time() - begin_time}毫秒配置响应：", result)
 
-        # 将音频数据转换为WAV格式的base64编码
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wf:
-            wf.setnchannels(CHANNELS)
-            wf.setsampwidth(p.get_sample_size(FORMAT))
-            wf.setframerate(RATE)
-            wf.writeframes(b''.join(frames))
+                # 开始采集麦克风音频并分段发送
+                async for chunk in self.stream_mic():
+                    seq += 1
+                    audio_only_request = bytearray(
+                        generate_header(message_type=AUDIO_ONLY_REQUEST,
+                                        message_type_specific_flags=POS_SEQUENCE))
+                    audio_only_request.extend(generate_before_payload(sequence=seq))
+                    compressed_chunk = gzip.compress(chunk)
+                    audio_only_request.extend((len(compressed_chunk)).to_bytes(4, "big"))
+                    audio_only_request.extend(compressed_chunk)
+                    await ws.send(audio_only_request)
+                    try:
+                        res = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                        result = parse_response(res)
+                        print(f"{time.time() - begin_time}毫秒接收响应：", result)
 
-        wav_buffer.seek(0)
-        audio_base64 = base64.b64encode(wav_buffer.read()).decode('utf-8')
+                    except asyncio.TimeoutError:
+                        pass
+                    await asyncio.sleep(self.seg_duration / 1000.0)
+        except Exception as e:
+            print("异常：", e)
 
-        return audio_base64
-
-    except OSError as e:
-        print(f"音频设备错误: {e}")
-        print("\n尝试解决方案:")
-        print("1. 检查麦克风是否连接并启用")
-        print("2. 确保没有其他程序占用麦克风")
-        print("3. 在Windows上，尝试以管理员权限运行")
-        return None
-    except Exception as e:
-        print(f"录音过程中出错: {e}")
-        return None
+    def run(self):
+        asyncio.run(self.execute())
 
 
-def send_audio_for_recognition(audio_data_base64):
-    """发送音频数据进行语音识别"""
+# -------------------- 入口 --------------------
+
+if __name__ == '__main__':
+    # 替换下面的 token 与 ws_url 为你的实际参数 停止直接ctrl+c即可
+    BASE = os.getenv("QINIU_BASE_URL", "https://openai.qiniu.com/v1")
+    API_KEY = os.getenv("QINIU_TTS_KEY", LLMmain.openai_api_key)
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {API_KEY}",   # 文档要求 Bearer 前缀
     }
+    token = LLMmain.openai_api_key
+    ws_url = "wss://openai.qiniu.com/v1/voice/asr"
+    seg_duration = 300  # 分段时长，单位毫秒,网络环境不好建议调大，否则会丢包
+    client = AsrMicClient(headers, seg_duration=seg_duration, format="pcm")
+    client.run()
 
-    # 修改后的payload，直接包含音频数据
-    payload = {
-        "model": "asr",
-        "audio": {
-            "format": "wav",  # 修改为wav格式
-            "data": audio_data_base64  # 直接发送base64编码的音频数据
-        }
-    }
-
-    resp = requests.post(f"{BASE}/voice/asr", headers=headers, json=payload, timeout=60)
-    print("HTTP状态码:", resp.status_code)
-
-    resp.raise_for_status()
-    data = resp.json()
-
-    # 提取识别文本
-    text = (data.get("data", {}).get("result", {}) or {}).get("text")
-    return text or "<未识别到文本>"
-
-
-def main():
-    # 检查API密钥
-    if not API_KEY:
-        print("错误: 请设置API_KEY环境变量")
-        return
-
-    # 1. 录制音频
-    audio_data = record_audio()
-
-    # 2. 发送识别请求
-    print("发送音频数据进行识别...")
-    recognized_text = send_audio_for_recognition(audio_data)
-
-    if recognized_text:
-        print(f"\n识别结果: {recognized_text}")
-
-        # 可选：保存识别结果到文件
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        with open(f"recognition_result_{timestamp}.txt", "w", encoding="utf-8") as f:
-            f.write(recognized_text)
-        print(f"结果已保存到: recognition_result_{timestamp}.txt")
-
-
-# # 替代方案：如果API不支持base64数据，可以先保存为临时文件再上传
-# def record_and_upload_alternative():
-#     """替代方案：保存为临时文件后上传URL"""
-#     import tempfile
-#     import urllib.parse
-
-#     # 录制音频（返回WAV文件路径）
-#     p = pyaudio.PyAudio()
-#     stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
-
-#     frames = []
-#     print("开始录音...（5秒）")
-
-#     for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
-#         data = stream.read(CHUNK)
-#         frames.append(data)
-
-#     stream.stop_stream()
-#     stream.close()
-#     p.terminate()
-
-#     # 保存为临时文件
-#     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-#         with wave.open(temp_file.name, 'wb') as wf:
-#             wf.setnchannels(CHANNELS)
-#             wf.setsampwidth(p.get_sample_size(FORMAT))
-#             wf.setframerate(RATE)
-#             wf.writeframes(b''.join(frames))
-
-#         temp_path = temp_file.name
-
-#     print(f"音频已保存到: {temp_path}")
-
-#     # 这里需要将文件上传到可公开访问的URL
-#     # 由于这需要额外的文件存储服务，这里只是示意
-#     print("注意：需要将文件上传到公网可访问的URL")
-#     return temp_path
-
-
-if __name__ == "__main__":
-    # 从环境变量获取API配置
-    API_KEY = LLMmain.openai_api_key
-    BASE = os.getenv("QINIU_BASE_URL", "https://openai.qiniu.com/v1")
-
-    # 检查pyaudio是否可用
-    try:
-        import pyaudio
-
-        main()
-    except ImportError:
-        print("错误: 需要安装pyaudio库")
-        print("安装命令: pip install pyaudio")
-        # 在Windows上可能需要: pip install pipwin && pipwin install pyaudio
+"""
+在 macOS 上，你可以通过 Homebrew 安装它：
+brew install portaudio
+安装完成后，再尝试安装 PyAudio：
+pip install pyaudio
+"""

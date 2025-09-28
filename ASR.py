@@ -5,7 +5,7 @@ import LLMmain
 def ASR(ASR_URL):
     AUDIO_URL = os.getenv(
         "ASR_AUDIO_URL",
-         ASR_URL # 官方示例URL
+         ASR_URL
     )
 
     BASE = os.getenv("QINIU_BASE_URL", "https://openai.qiniu.com/v1")
@@ -15,7 +15,7 @@ def ASR(ASR_URL):
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}",   # 文档要求 Bearer 前缀
+        "Authorization": f"Bearer {API_KEY}",
     }
 
     payload = {

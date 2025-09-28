@@ -56,4 +56,4 @@ def TTS(content):
     data_json = response.json() #格式转换
     data_content = data_json['data']
     play_audio(data_content)
-# TTS(LLMmain.fristsentence)
+# TTS("请将需要文字转语音的文本放在这里")

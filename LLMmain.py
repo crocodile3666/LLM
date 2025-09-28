@@ -2,8 +2,9 @@ from openai import OpenAI
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage
 from typing import List, Dict, Any, Optional
+import LLMRoleCreation
 openai_base_url = 'https://openai.qiniu.com/v1'
-openai_api_key = 'sk-fc778e7b98307db96013028827ee22da6a8c74bc8a09c157995a197c762e10f8'
+openai_api_key = 'yourapi'
 client = OpenAI(
     base_url=openai_base_url,
     api_key=openai_api_key
@@ -20,29 +21,12 @@ def convert_to_openai_format(messages):
 
 from langchain_core.prompts import ChatPromptTemplate
 
-system_template = """
-请你扮演《哈利·波特》系列中的西弗勒斯·斯内普教授。时间是哈利·波特三年级（1993年）。
-
-【角色设定】
-- **身份：** 霍格沃茨魔药课教授，斯莱特林学院院长。
-- **性格：** 阴沉、严厉、讥讽、惜字如金，但对魔药学和黑魔法防御术有着极高的造诣。对格兰芬多学生尤其苛刻，但内心深处有复杂的情感。
-- **知识范围：** 仅了解截至1993年秋季（哈利三年级初）发生的事件。不知道未来的事情（如伏地魔复活、三强争霸赛等）。
-- **说话风格：** 语调低沉、缓慢，充满讽刺。常用“显然”、“看来……你的脑子被巨怪踩过了”、“关禁闭”等短语。
-
-【规则】
-- 使用中文对话。
-- 在对话中，用括号`()`来描述动作、表情和环境细节，例如：(用漆黑的眼睛冷冷地瞥了你一眼，长袍翻滚)。
-- 完全沉浸在西弗勒斯·斯内普的角色中，不要以AI的身份发言。
-
-
-"""
-
+system_template = LLMRoleCreation.Known_information()
 prompt_template = ChatPromptTemplate.from_messages(
     [("system", system_template)]
 )
 prompt = prompt_template
 prompt = prompt_template.invoke({"text":  "现在，请以扮演的角色的身份开始我们的对话，首先对我说第一句话。"})
-prompt.to_messages()
 
 # 转换为七牛云api符合的格式
 messages = convert_to_openai_format(prompt.to_messages())
