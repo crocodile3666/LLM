@@ -3,7 +3,7 @@ from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage
 from typing import List, Dict, Any, Optional
 openai_base_url = 'https://openai.qiniu.com/v1'
-openai_api_key = 'sk-c80c48d9f23cdd2afd5835fed42329fdd10a0b69e5e5dee3e5875b63a28e8290'
+openai_api_key = 'sk-fc778e7b98307db96013028827ee22da6a8c74bc8a09c157995a197c762e10f8'
 client = OpenAI(
     base_url=openai_base_url,
     api_key=openai_api_key

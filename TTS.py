@@ -5,7 +5,7 @@ import pygame
 import tempfile
 import time
 
-def TTS(content):
+def TTSmain(content):
     url = "https://openai.qiniu.com/v1/voice/tts"
     headers = {
         "Content-Type": "application/json",
@@ -27,7 +27,7 @@ def TTS(content):
     return response
 
 
-def smart_play_audio(base64_string):
+def play_audio(base64_string):
     """智能检测音频格式并播放"""
     # 解码Base64
     audio_data = base64.b64decode(base64_string)
@@ -44,8 +44,18 @@ def smart_play_audio(base64_string):
     while pygame.mixer.music.get_busy():
         time.sleep(0.1)
     print("音频播放完成")
-# response = TTS(LLMmain.fristsentence)
+# response = TTSmain(LLMmain.fristsentence)
 # data_json = response.json()
-# data_content = data_json['data']
-# smart_play_audio(data_content)
+# print(response.json())
 
+def content(data):  #格式转换
+    data_json = data.json()
+    data_content = data_json['data']
+    return data_content
+# data_content = data_json['data']
+# play_audio(data_content)
+
+def TTS(content):
+    response = TTSmain(content)
+    data_content = content(response)
+    play_audio(data_content)

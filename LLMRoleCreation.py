@@ -1,8 +1,9 @@
 from openai import OpenAI
 from langchain.prompts import PromptTemplate, ChatPromptTemplate
+import LLMmain
 
 openai_base_url = 'https://openai.qiniu.com/v1'
-openai_api_key = 'sk-c80c48d9f23cdd2afd5835fed42329fdd10a0b69e5e5dee3e5875b63a28e8290'
+openai_api_key = LLMmain.openai_api_key
 client = OpenAI(
     base_url=openai_base_url,
     api_key=openai_api_key

@@ -3,12 +3,15 @@ import json
 import requests
 import LLMmain
 
-BASE = os.getenv("QINIU_BASE_URL", "https://openai.qiniu.com/v1")
-API_KEY = os.getenv("QINIU_TTS_KEY", LLMmain.openai_api_key)  # 建议用环境变量
 AUDIO_URL = os.getenv(
     "ASR_AUDIO_URL",
     "https://static.qiniu.com/ai-inference/example-resources/example.mp3"  # 官方示例URL
 )
+
+BASE = os.getenv("QINIU_BASE_URL", "https://openai.qiniu.com/v1")
+API_KEY = os.getenv("QINIU_TTS_KEY", LLMmain.openai_api_key)
+
+
 
 headers = {
     "Content-Type": "application/json",
@@ -19,7 +22,7 @@ payload = {
     "model": "asr",
     "audio": {
         "format": "mp3",
-        "url": AUDIO_URL            # 必须是 http(s) 公网可访问
+        "url": AUDIO_URL
     }
 }
 
